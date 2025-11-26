@@ -2,8 +2,8 @@ name: Job Finder Bot
 
 on:
   schedule:
-    - cron: "0 * * * *"  # every hour
-  workflow_dispatch:
+    - cron: "0 * * * *"  # every hour at minute 0
+  workflow_dispatch:      # manual trigger
 
 jobs:
   run-job-bot:
