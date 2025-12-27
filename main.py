@@ -34,8 +34,8 @@ def send_telegram(message: str):
         print(f"❌ Failed to send Telegram message: {e}")
         return False
 
-def is_today_job(job_data):
-    """Check if job was posted today"""
+def is_recent_job(job_data, days_limit=3):
+    """Check if job was posted within the last N days"""
     today = date.today()
     
     # Handle different date formats from different APIs
@@ -55,9 +55,18 @@ def is_today_job(job_data):
                 # Simple date format: "2023-11-26"
                 job_date = datetime.strptime(publication_date, "%Y-%m-%d").date()
             
-            return job_date == today
-        except (ValueError, AttributeError):
+            delta = (today - job_date).days
+            return 0 <= delta <= days_limit
+        except (ValueError, AttributeError) as e:
+            # print(f"Date parse error: {e} for {publication_date}")
             return False
+            
+    # If it's already a date/datetime object
+    if isinstance(publication_date, (date, datetime)):
+        if isinstance(publication_date, datetime):
+            publication_date = publication_date.date()
+        delta = (today - publication_date).days
+        return 0 <= delta <= days_limit
     
     return False
 
@@ -72,9 +81,9 @@ def fetch_remotive():
 
         results = []
         for job in jobs:
-            # Check if job matches keywords AND is from today
+            # Check if job matches keywords AND is recent
             text = f"{job['title']} {job['description']}".lower()
-            if any(k in text for k in KEYWORDS) and is_today_job(job):
+            if any(k in text for k in KEYWORDS) and is_recent_job(job):
                 results.append({
                     "title": job["title"],
                     "company": job["company_name"],
@@ -82,7 +91,7 @@ def fetch_remotive():
                     "source": "Remotive",
                     "date": job.get("publication_date", "Unknown")
                 })
-        print(f"✅ Remotive: {len(results)} matching jobs from today")
+        print(f"✅ Remotive: {len(results)} matching recent jobs")
         return results
     except Exception as e:
         print(f"❌ Remotive error: {e}")
@@ -105,13 +114,18 @@ def fetch_remoteok():
             # RemoteOK uses timestamp in seconds
             job_timestamp = job.get('epoch', job.get('date'))
             if job_timestamp:
-                job_date = datetime.fromtimestamp(job_timestamp).date()
-                is_today = job_date == date.today()
+                try:
+                    job_date = datetime.fromtimestamp(int(job_timestamp)).date()
+                    # Check if recent
+                    delta = (date.today() - job_date).days
+                    is_recent = 0 <= delta <= 3
+                except:
+                    is_recent = False
             else:
-                is_today = False
+                is_recent = False
             
             text = f"{job.get('position', '')} {job.get('description', '')}".lower()
-            if any(k in text for k in KEYWORDS) and is_today:
+            if any(k in text for k in KEYWORDS) and is_recent:
                 results.append({
                     "title": job.get("position"),
                     "company": job.get("company"),
@@ -119,45 +133,113 @@ def fetch_remoteok():
                     "source": "RemoteOK",
                     "date": job_date.strftime("%Y-%m-%d")
                 })
-        print(f"✅ RemoteOK: {len(results)} matching jobs from today")
+        print(f"✅ RemoteOK: {len(results)} matching recent jobs")
         return results
     except Exception as e:
         print(f"❌ RemoteOK error: {e}")
         return []
 
-# ----------- INDEED SCRAPER (Updated for current jobs) -----------
-def fetch_indeed():
-    print("🔍 Fetching from Indeed...")
+# ----------- WE WORK REMOTELY (RSS) -----------
+def fetch_wwr():
+    print("🔍 Fetching from WeWorkRemotely...")
     try:
-        # Search for recent jobs (last 1 day)
-        url = "https://ng.indeed.com/jobs?q=python+backend+fastapi&l=&fromage=1"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers)
-        html = response.text
+        # We Work Remotely has an RSS feed which is easier to parse than scraping HTML
+        url = "https://weworkremotely.com/remote-jobs.rss"
+        response = requests.get(url) 
+        # Simple XML parsing using string manipulation to avoid complex dependencies
+        # In a production app, use 'feedparser' or 'xml.etree.ElementTree'
+        import xml.etree.ElementTree as ET
+        
+        try:
+            root = ET.fromstring(response.content)
+            items = root.findall('.//item')
+            print(f"📊 WWR: Found {len(items)} total jobs in feed")
+            
+            results = []
+            for item in items:
+                title = item.find('title').text if item.find('title') is not None else ""
+                description = item.find('description').text if item.find('description') is not None else ""
+                link = item.find('link').text if item.find('link') is not None else ""
+                pubDate = item.find('pubDate').text if item.find('pubDate') is not None else ""
+                
+                # WWR format: "Mon, 27 Dec 2025 10:00:00 +0000"
+                try:
+                    # Parse simplified date
+                    job_dt = datetime.strptime(pubDate.split('+')[0].strip(), "%a, %d %b %Y %H:%M:%S")
+                    job_data = {'date': job_dt.date()}
+                    is_recent = is_recent_job(job_data)
+                    date_str = job_dt.strftime("%Y-%m-%d")
+                except:
+                    is_recent = True # Only most recent 50 are in RSS usually, so assume recent
+                    date_str = "Recent"
 
-        # Improved pattern to catch date information
-        pattern = r'jobTitle">(.*?)</h2.*?companyName">(.*?)</span.*?date.*?">(.*?)</span.*?href="(\/rc.*?)"'
-        matches = re.findall(pattern, html, re.S)
-        print(f"📊 Indeed: Found {len(matches)} total jobs")
+                text = f"{title} {description}".lower()
+                if any(k in text for k in KEYWORDS) and is_recent:
+                    results.append({
+                        "title": title,
+                        "company": "WeWorkRemotely Job", # WWR RSS often puts company in title "Company: Role"
+                        "url": link,
+                        "source": "WeWorkRemotely",
+                        "date": date_str
+                    })
+            
+            print(f"✅ WWR: {len(results)} matching recent jobs")
+            return results
+            
+        except ET.ParseError:
+            print("❌ WWR XML Parse Error")
+            return []
+            
+    except Exception as e:
+        print(f"❌ WWR error: {e}")
+        return []
 
+# ----------- HACKER NEWS (WHO IS HIRING) -----------
+def fetch_hackernews():
+    print("🔍 Fetching from Hacker News...")
+    try:
+        # Fetch top job stories
+        url = "https://hacker-news.firebaseio.com/v0/jobstories.json"
+        job_ids = requests.get(url).json()[:50] # Check top 50
+        print(f"📊 Hacker News: Checking top {len(job_ids)} job posts")
+        
         results = []
-        for title, company, date_str, link in matches:
-            # Indeed often shows "Just posted" or "Today" for recent jobs
-            if 'today' in date_str.lower() or 'just' in date_str.lower() or '1 day' in date_str.lower():
-                full_url = "https://ng.indeed.com" + link
+        for jid in job_ids:
+            item_url = f"https://hacker-news.firebaseio.com/v0/item/{jid}.json"
+            job = requests.get(item_url).json()
+            
+            if not job or 'title' not in job:
+                continue
+                
+            # HN jobs are usually just a title/text, sometimes url
+            title = job.get('title', 'Unknown')
+            text = job.get('text', '') or title
+            
+            # Check date
+            job_time = job.get('time')
+            if job_time:
+                job_date = datetime.fromtimestamp(job_time).date()
+                if not is_recent_job({'date': job_date}):
+                    continue
+                date_str = job_date.strftime("%Y-%m-%d")
+            else:
+                date_str = "Recent"
+            
+            content_to_check = f"{title} {text}".lower()
+            
+            if any(k in content_to_check for k in KEYWORDS):
                 results.append({
-                    "title": title.strip(),
-                    "company": company.strip(),
-                    "url": full_url,
-                    "source": "Indeed",
-                    "date": "Today"
+                    "title": title,
+                    "company": "Hacker News",
+                    "url": job.get('url', f"https://news.ycombinator.com/item?id={jid}"),
+                    "source": "Hacker News",
+                    "date": date_str
                 })
-        print(f"✅ Indeed: {len(results)} matching jobs from today")
+                
+        print(f"✅ Hacker News: {len(results)} matching recent jobs")
         return results
     except Exception as e:
-        print(f"❌ Indeed error: {e}")
+        print(f"❌ Hacker News error: {e}")
         return []
 
 # ----------- MAIN PIPELINE -----------
@@ -176,7 +258,10 @@ def run():
     try:
         all_jobs.extend(fetch_remotive())
         all_jobs.extend(fetch_remoteok())
-        all_jobs.extend(fetch_indeed())
+        all_jobs.extend(fetch_wwr())
+        all_jobs.extend(fetch_hackernews())
+        # Indeed is disabled due to high failure rate
+        # all_jobs.extend(fetch_indeed())
     except Exception as e:
         error_msg = f"⚠️ Job bot error: {str(e)}"
         print(error_msg)
